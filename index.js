@@ -13,6 +13,14 @@ const openai = new OpenAI({
 // Налаштування телеграм-бота
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
+// ID адміністратора
+const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID;
+
+// Функція перевірки чи користувач є адміністратором
+function isAdmin(ctx) {
+  return ctx.from.id.toString() === ADMIN_ID;
+}
+
 // Підключення до MongoDB Atlas
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
@@ -373,6 +381,252 @@ bot.on('text', (ctx) => {
 cron.schedule('0 8 * * *', async () => {
   console.log('Починаємо щоденну розсилку гороскопів...');
   await sendHoroscopesToAllUsers();
+});
+
+// Адміністративні команди
+bot.command('admin', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply('У вас немає доступу до цієї команди.');
+  }
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '📊 Загальна статистика', callback_data: 'admin_stats' }],
+      [{ text: '👥 Користувачі за сьогодні', callback_data: 'admin_today' }],
+      [{ text: '🌍 Користувачі за мовами', callback_data: 'admin_languages' }],
+      [{ text: '⭐ Користувачі за знаками', callback_data: 'admin_zodiac' }],
+      [{ text: '📈 Графік реєстрацій', callback_data: 'admin_graph' }],
+      [{ text: '📨 Розсилка', callback_data: 'admin_broadcast' }]
+    ]
+  };
+
+  await ctx.reply('Панель адміністратора:', { reply_markup: keyboard });
+});
+
+// Обробка адміністративних callback-ів
+bot.action('admin_stats', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  try {
+    const totalUsers = await User.countDocuments();
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const newUsersToday = await User.countDocuments({ registrationDate: { $gte: today } });
+
+    await ctx.editMessageText(
+      `📊 *Загальна статистика*\n\n` +
+      `Загальна кількість користувачів: ${totalUsers}\n` +
+      `Нових користувачів сьогодні: ${newUsersToday}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error) {
+    console.error('Помилка при отриманні статистики:', error);
+    await ctx.reply('Виникла помилка при отриманні статистики.');
+  }
+});
+
+bot.action('admin_today', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayUsers = await User.find({ registrationDate: { $gte: today } });
+
+    let message = '👥 *Користувачі за сьогодні*\n\n';
+    for (const user of todayUsers) {
+      message += `ID: ${user.chatId}\n` +
+                `Знак: ${user.zodiacSign}\n` +
+                `Мова: ${LANGUAGES[user.language]}\n` +
+                `Час: ${user.registrationDate.toLocaleTimeString()}\n\n`;
+    }
+
+    await ctx.editMessageText(message, { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('Помилка при отриманні користувачів за сьогодні:', error);
+    await ctx.reply('Виникла помилка при отриманні даних.');
+  }
+});
+
+bot.action('admin_languages', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  try {
+    const languageStats = await User.aggregate([
+      { $group: { _id: '$language', count: { $sum: 1 } } }
+    ]);
+
+    let message = '🌍 *Користувачі за мовами*\n\n';
+    for (const stat of languageStats) {
+      message += `${LANGUAGES[stat._id]}: ${stat.count}\n`;
+    }
+
+    await ctx.editMessageText(message, { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('Помилка при отриманні статистики за мовами:', error);
+    await ctx.reply('Виникла помилка при отриманні статистики.');
+  }
+});
+
+bot.action('admin_zodiac', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  try {
+    const zodiacStats = await User.aggregate([
+      { $group: { _id: '$zodiacSign', count: { $sum: 1 } } }
+    ]);
+
+    let message = '⭐ *Користувачі за знаками зодіаку*\n\n';
+    for (const stat of zodiacStats) {
+      message += `${stat._id}: ${stat.count}\n`;
+    }
+
+    await ctx.editMessageText(message, { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('Помилка при отриманні статистики за знаками:', error);
+    await ctx.reply('Виникла помилка при отриманні статистики.');
+  }
+});
+
+bot.action('admin_graph', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  try {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const registrations = await User.aggregate([
+      {
+        $match: {
+          registrationDate: { $gte: sevenDaysAgo }
+        }
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$registrationDate' } },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    let message = '📈 *Реєстрації за останні 7 днів*\n\n';
+    for (const reg of registrations) {
+      message += `${reg._id}: ${reg.count} користувачів\n`;
+    }
+
+    await ctx.editMessageText(message, { parse_mode: 'Markdown' });
+  } catch (error) {
+    console.error('Помилка при отриманні графіка реєстрацій:', error);
+    await ctx.reply('Виникла помилка при отриманні графіка.');
+  }
+});
+
+// Розсилка повідомлень
+bot.action('admin_broadcast', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: '📨 Всім користувачам', callback_data: 'broadcast_all' }],
+      [{ text: '🌍 За мовою', callback_data: 'broadcast_language' }],
+      [{ text: '⭐ За знаком зодіаку', callback_data: 'broadcast_zodiac' }]
+    ]
+  };
+
+  await ctx.editMessageText('Виберіть тип розсилки:', { reply_markup: keyboard });
+});
+
+// Обробка вибору типу розсилки
+bot.action('broadcast_all', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  ctx.session = { ...ctx.session, broadcastType: 'all' };
+  await ctx.reply('Введіть повідомлення для розсилки:');
+});
+
+bot.action('broadcast_language', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const keyboard = {
+    inline_keyboard: Object.entries(LANGUAGES).map(([code, name]) => [
+      { text: name, callback_data: `broadcast_lang_${code}` }
+    ])
+  };
+  await ctx.editMessageText('Виберіть мову:', { reply_markup: keyboard });
+});
+
+bot.action('broadcast_zodiac', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const keyboard = {
+    inline_keyboard: ZODIAC_SIGNS.map(sign => [
+      { text: sign, callback_data: `broadcast_zodiac_${sign}` }
+    ])
+  };
+  await ctx.editMessageText('Виберіть знак зодіаку:', { reply_markup: keyboard });
+});
+
+// Обробка вибору мови для розсилки
+Object.keys(LANGUAGES).forEach(langCode => {
+  bot.action(`broadcast_lang_${langCode}`, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    ctx.session = { ...ctx.session, broadcastType: 'language', language: langCode };
+    await ctx.reply('Введіть повідомлення для розсилки:');
+  });
+});
+
+// Обробка вибору знаку зодіаку для розсилки
+ZODIAC_SIGNS.forEach(sign => {
+  bot.action(`broadcast_zodiac_${sign}`, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    ctx.session = { ...ctx.session, broadcastType: 'zodiac', zodiacSign: sign };
+    await ctx.reply('Введіть повідомлення для розсилки:');
+  });
+});
+
+// Обробка текстового повідомлення для розсилки
+bot.on('text', async (ctx) => {
+  if (!isAdmin(ctx) || !ctx.session?.broadcastType) return;
+
+  const message = ctx.message.text;
+  let users;
+
+  try {
+    switch (ctx.session.broadcastType) {
+      case 'all':
+        users = await User.find({});
+        break;
+      case 'language':
+        users = await User.find({ language: ctx.session.language });
+        break;
+      case 'zodiac':
+        users = await User.find({ zodiacSign: ctx.session.zodiacSign });
+        break;
+    }
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const user of users) {
+      try {
+        await bot.telegram.sendMessage(user.chatId, message);
+        successCount++;
+      } catch (error) {
+        console.error(`Помилка надсилання повідомлення користувачу ${user.chatId}:`, error);
+        failCount++;
+      }
+    }
+
+    await ctx.reply(
+      `Розсилка завершена:\n` +
+      `Успішно: ${successCount}\n` +
+      `Помилок: ${failCount}`
+    );
+
+    // Очищення сесії
+    ctx.session = {};
+  } catch (error) {
+    console.error('Помилка при розсилці:', error);
+    await ctx.reply('Виникла помилка при розсилці повідомлень.');
+  }
 });
 
 // Запуск бота
