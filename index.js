@@ -1,5 +1,5 @@
 // Підключення необхідних бібліотек
-const { Telegraf } = require('telegraf');
+const { Telegraf, session } = require('telegraf');
 const mongoose = require('mongoose');
 const { OpenAI } = require('openai');
 const cron = require('node-cron');
@@ -13,12 +13,28 @@ const openai = new OpenAI({
 // Налаштування телеграм-бота
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
+// Підключення сесій
+bot.use(session());
+
+// Додаємо middleware для логування всіх апдейтів
+bot.use((ctx, next) => {
+  console.log('=== New Update ===');
+  console.log('Update type:', ctx.updateType);
+  console.log('Update subtype:', ctx.updateSubTypes);
+  if (ctx.message?.text) {
+    console.log('Message text:', ctx.message.text);
+  }
+  return next();
+});
+
 // ID адміністратора
-const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID;
+const ADMIN_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 
 // Функція перевірки чи користувач є адміністратором
 function isAdmin(ctx) {
-  return ctx.from.id.toString() === ADMIN_ID;
+  const isAdminUser = ctx.from.id === ADMIN_ID;
+  console.log(`Is admin check: ${isAdminUser} (${ctx.from.id} === ${ADMIN_ID})`);
+  return isAdminUser;
 }
 
 // Підключення до MongoDB Atlas
@@ -148,7 +164,7 @@ async function sendHoroscopesToAllUsers() {
 }
 
 // Команда /start - вітання та пропозиція зареєструватися
-bot.start(async (ctx) => {
+bot.command('start', async (ctx) => {
   await ctx.reply(
     'Welcome! I am a bot that sends daily horoscopes. ' +
     'To receive horoscopes, please register by selecting your preferred language and zodiac sign.',
@@ -357,34 +373,8 @@ bot.command('horoscope', async (ctx) => {
   }
 });
 
-// Команда /help - відображення допомоги
-bot.help((ctx) => {
-  ctx.reply(
-    'Доступні команди:\n' +
-    '/start - Запустити бота\n' +
-    '/register - Зареєструватися або змінити налаштування\n' +
-    '/profile - Переглянути свій профіль\n' +
-    '/horoscope - Отримати сьогоднішній гороскоп\n' +
-    '/help - Показати цю довідку'
-  );
-});
-
-// Відповідь на текстові повідомлення
-bot.on('text', (ctx) => {
-  ctx.reply(
-    'Будь ласка, використовуйте команди для взаємодії з ботом.\n' +
-    'Введіть /help для відображення доступних команд.'
-  );
-});
-
-// Планування щоденної розсилки гороскопів о 8:00 ранку
-cron.schedule('0 8 * * *', async () => {
-  console.log('Починаємо щоденну розсилку гороскопів...');
-  await sendHoroscopesToAllUsers();
-});
-
 // Адміністративні команди
-bot.command('admin', async (ctx) => {
+bot.command('adminn', async (ctx) => {
   if (!isAdmin(ctx)) {
     return ctx.reply('У вас немає доступу до цієї команди.');
   }
@@ -400,7 +390,12 @@ bot.command('admin', async (ctx) => {
     ]
   };
 
-  await ctx.reply('Панель адміністратора:', { reply_markup: keyboard });
+  try {
+    await ctx.reply('Панель адміністратора:', { reply_markup: keyboard });
+  } catch (error) {
+    console.error('Error sending admin panel:', error);
+    await ctx.reply('Виникла помилка при відкритті панелі адміністратора.');
+  }
 });
 
 // Обробка адміністративних callback-ів
@@ -582,56 +577,26 @@ ZODIAC_SIGNS.forEach(sign => {
   });
 });
 
-// Обробка текстового повідомлення для розсилки
-bot.on('text', async (ctx) => {
-  if (!isAdmin(ctx) || !ctx.session?.broadcastType) return;
-
-  const message = ctx.message.text;
-  let users;
-
-  try {
-    switch (ctx.session.broadcastType) {
-      case 'all':
-        users = await User.find({});
-        break;
-      case 'language':
-        users = await User.find({ language: ctx.session.language });
-        break;
-      case 'zodiac':
-        users = await User.find({ zodiacSign: ctx.session.zodiacSign });
-        break;
-    }
-
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const user of users) {
-      try {
-        await bot.telegram.sendMessage(user.chatId, message);
-        successCount++;
-      } catch (error) {
-        console.error(`Помилка надсилання повідомлення користувачу ${user.chatId}:`, error);
-        failCount++;
-      }
-    }
-
-    await ctx.reply(
-      `Розсилка завершена:\n` +
-      `Успішно: ${successCount}\n` +
-      `Помилок: ${failCount}`
-    );
-
-    // Очищення сесії
-    ctx.session = {};
-  } catch (error) {
-    console.error('Помилка при розсилці:', error);
-    await ctx.reply('Виникла помилка при розсилці повідомлень.');
-  }
+// Перевіряємо чи бот запущений
+bot.telegram.getMe().then((botInfo) => {
+  console.log('Bot started:', botInfo.username);
+}).catch((error) => {
+  console.error('Error getting bot info:', error);
 });
 
 // Запуск бота
 bot.launch()
-  .then(() => console.log('Бот запущено'))
+  .then(async () => {
+    console.log('Бот запущено');
+    // Реєструємо команди
+    await bot.telegram.setMyCommands([
+      { command: 'start', description: 'Запустити бота' },
+      { command: 'register', description: 'Зареєструватися або змінити налаштування' },
+      { command: 'profile', description: 'Переглянути свій профіль' },
+      { command: 'horoscope', description: 'Отримати сьогоднішній гороскоп' },
+      { command: 'help', description: 'Показати довідку' }
+    ]);
+  })
   .catch(err => console.error('Помилка запуску бота:', err));
 
 // Обробка завершення роботи
